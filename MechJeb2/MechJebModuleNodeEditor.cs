@@ -19,6 +19,9 @@ namespace MuMech
         EditableDouble normalPlusDelta = 0;
         [Persistent(pass = (int)Pass.Global)]
         EditableTime timeOffset = 0;
+        EditableDouble inputAngleTo = 0;
+        [Persistent(pass = (int)Pass.Global)]
+        EditableInt retrogradeSelect = 0;
 
         ManeuverNode node;
         ManeuverGizmo gizmo;
@@ -27,12 +30,17 @@ namespace MuMech
         static int numSnaps = Enum.GetNames(typeof(Snap)).Length;
         Snap snap = Snap.PERIAPSIS;
         string[] snapStrings = new string[] { "periapsis", "apoapsis", "AN with target", "DN with target", "equatorial AN", "equatorial DN" };
+        string[] AngleStrings = new string[] { "prograde", "retrograde" };
 
         void GizmoUpdateHandler(Vector3d dV, double UT)
         {
             prograde = dV.z;
             radialPlus = dV.x;
             normalPlus = dV.y;
+            if (retrogradeSelect == 0)
+                inputAngleTo = AngleToProgradeAtUT(UT);
+            else
+                inputAngleTo = AngleToProgradeAtUT(UT) - 180;
         }
 
         protected override void WindowGUI(int windowID)
@@ -70,6 +78,10 @@ namespace MuMech
                 prograde = node.DeltaV.z;
                 radialPlus = node.DeltaV.x;
                 normalPlus = -node.DeltaV.y;
+                if (retrogradeSelect == 0)
+                    inputAngleTo = AngleToProgradeAtUT(node.UT);
+                else
+                    inputAngleTo = AngleToProgradeAtUT(node.UT) - 180;
             }
 
             if (gizmo != node.attachedGizmo)
@@ -176,9 +188,27 @@ namespace MuMech
                 }
                 node.OnGizmoUpdated(node.DeltaV, UT);
             }
-
             snap = (Snap)GuiUtils.ArrowSelector((int)snap, numSnaps, snapStrings[(int)snap]);
+            GUILayout.EndHorizontal();
 
+            GUILayout.BeginHorizontal();
+            int retrogradeSelect_old = retrogradeSelect;
+            retrogradeSelect = GUILayout.Toolbar(retrogradeSelect, AngleStrings);
+            if (retrogradeSelect != retrogradeSelect_old)
+            {
+                if (retrogradeSelect == 0)
+                    inputAngleTo = AngleToProgradeAtUT(node.UT);
+                else
+                    inputAngleTo = AngleToProgradeAtUT(node.UT) - 180;
+            }
+            inputAngleTo.text = GUILayout.TextField(inputAngleTo.text, GUILayout.Width(60));
+            GUILayout.Label("º", GUILayout.ExpandWidth(false));
+            if (GUILayout.Button("Set", GUILayout.ExpandWidth(true)))
+            {
+                node.OnGizmoUpdated(node.DeltaV, progradeAngleChangeUT());
+                // The calculation is not so accurate, and doing again seems to help massively
+                node.OnGizmoUpdated(node.DeltaV, progradeAngleChangeUT());
+            }
             GUILayout.EndHorizontal();
 
             RelativityModeSelectUI();
@@ -186,6 +216,56 @@ namespace MuMech
             GUILayout.EndVertical();
 
             base.WindowGUI(windowID);
+        }
+
+        double AngleToProgradeAtUT(double UT)
+        {
+            double angleToPrograde = 0;
+            if (vessel.mainBody != Planetarium.fetch.Sun)
+            {
+                Orbit o = node.patch;
+                Orbit refo = o.referenceBody.orbit;
+                double rawAngleToPrograde = ((Vector3)o.Up(UT)).AngleInPlane(refo.NormalPlus(UT), refo.Prograde(UT));
+                double retrogradeFactor = (((o.inclination > 90) || (o.inclination < -90)) ? 1 : -1);
+                angleToPrograde = MuUtils.ClampDegrees360(retrogradeFactor * rawAngleToPrograde);
+            }
+            //print("node ATP = " + angleToPrograde);
+            return angleToPrograde;
+        }
+
+        double progradeAngleChangeUT()
+        {
+            // Implicitly assuming a near circular orbit
+            double UT = node.UT;
+            double deltaTime = 0;
+            double inputAngleToPrograde = inputAngleTo;
+            if (retrogradeSelect == 1)
+                inputAngleToPrograde += 180;
+
+            if (vessel.mainBody != Planetarium.fetch.Sun)
+            {
+                Orbit o = node.patch;
+                double currentUT = Planetarium.GetUniversalTime();
+                if (UT < currentUT)
+                {
+                    UT = currentUT;
+                }
+                double deltaATP = MuUtils.ClampDegrees180(AngleToProgradeAtUT(UT) - inputAngleToPrograde);
+                if (Math.Abs(deltaATP) > 0.01)
+                {
+                    Orbit refo = o.referenceBody.orbit;
+                    Vector3d refNorm = refo.NormalPlus(UT);
+                    double retrogradeFactor = (((o.inclination > 90) || (o.inclination < -90)) ? 1 : -1);
+                    Vector3d newUp = Quaternion.AngleAxis((float)(-retrogradeFactor * deltaATP), refNorm) * o.Up(UT);
+                    double newTrueAnomaly = o.TrueAnomalyFromVector(newUp);
+                    deltaTime = o.TimeOfTrueAnomaly(newTrueAnomaly, UT - o.period/2) - UT;
+                    if ((deltaTime < 0) && ((UT + deltaTime) <= currentUT))
+                    {
+                        deltaTime += o.period;
+                    }
+                }
+            }
+           return UT + deltaTime;
         }
 
         static readonly string[] relativityModeStrings = { "0", "1", "2", "3", "4" };
